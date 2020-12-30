@@ -148,8 +148,8 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	writel(0, i82540EM_dev->regs + i82540EM_FCTTV);
 
 	// Program Ethernet Address.
-	writel(0xAABBCCDD, i82540EM_dev->regs + i82540EM_RAL);
-	writel(0xEEFF,     i82540EM_dev->regs + i82540EM_RAH);
+	writel(0xCCDDEEFF, i82540EM_dev->regs + i82540EM_RAL);
+	writel(0xAABB,     i82540EM_dev->regs + i82540EM_RAH);
 
 	// Initialize the multicast table array.
 	// 128 32-bit entries.
@@ -188,18 +188,21 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	// As a rx descriptor has fixed len of 16, must have a multiple of 8 rx descriptors.
 	writel(i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE, i82540EM_dev->regs + i82540EM_RDLEN);
 
-	// Should probably program the Head and Tail registers here,
-	// but it's unclear what to program them to on initial state, since they init to zero.
-	// this might already be valid.
+	// Initialize the head and tail registers here to zero.
+	// They should be zero post-reset, but do it just in case.
+	writel(0, i82540EM_dev->regs + i82540EM_RDH);
+	writel(0, i82540EM_dev->regs + i82540EM_RDT);
 
 	// Enable the receiver. This is the last step to start receiving packets.
 	u32 rctl = readl(i82540EM_dev->regs + i82540EM_RCTL);
 	rctl |= (i82540EM_RCTL_BITMASK_EN | i82540EM_RCTL_BITMASK_BAM);
 	writel(rctl, i82540EM_dev->regs + i82540EM_RCTL);
 
-	printk(KERN_INFO "i82540EM: Init completed successfully.\n");
-	printk(KERN_INFO "i82540EM: Sending test interrup.\n");
+	// Send a test interrupt.
+	printk(KERN_INFO "i82540EM: Sending test interrupt.\n");
 	writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_ICS);
+
+	printk(KERN_INFO "i82540EM: Init completed successfully.\n");
 
 	return 0;
 
@@ -210,7 +213,6 @@ err_request_irq:
 			i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_SETTING_RX_BUFFER_SIZE,
 			i82540EM_dev->rx_buffers,
 			i82540EM_dev->rx_buffers_dma_handle);
-
 
 err_rx_buffers_dma_alloc_coherent:
 	if(i82540EM_dev->rx_descriptors)
