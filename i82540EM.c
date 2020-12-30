@@ -106,6 +106,10 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	writel(i82540EM_CTRL_BITMASK_RST, i82540EM_dev->regs + i82540EM_CTRL);
 	udelay(100);
 
+	// The ICS register isn't cleared on reset, unread pending interrupts here
+	// will prevent new interrupts from being issued. So read the register to clear it.
+	readl(i82540EM_dev->regs + i82540EM_ICR);
+
 	// Allocate DMA mapping for the rx descriptor ring.
 	// This should be on a 16-byte boundary. How do we ensure this?
 	i82540EM_dev->rx_descriptors = dma_alloc_coherent(
@@ -157,9 +161,12 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 		writel(0, i82540EM_dev->regs + i82540EM_MTA + (4 * i));
 	}
 
-	// Clear the register mask, and only enable RXT0 timer interrupt.
+	// Clear the interrupt mask.
 	writel(0xFFFFFFFF, i82540EM_dev->regs + i82540EM_IMC);
-	writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_IMS);
+
+	// Enable desired interrupts.
+	writel(0xFFFFFFFF, i82540EM_dev->regs + i82540EM_IMS);
+	//writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_IMS);
 
 	// Request the IRQ and register the handler here.
 	error = request_irq(pci_dev->irq, test_isr, IRQF_SHARED, "i82540EM", i82540EM_dev);
@@ -195,7 +202,7 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 
 	// Enable the receiver. This is the last step to start receiving packets.
 	u32 rctl = readl(i82540EM_dev->regs + i82540EM_RCTL);
-	rctl |= (i82540EM_RCTL_BITMASK_EN | i82540EM_RCTL_BITMASK_BAM);
+	rctl |= (i82540EM_RCTL_BITMASK_EN | i82540EM_RCTL_BITMASK_BAM | i82540EM_RCTL_BITMASK_UPE);
 	writel(rctl, i82540EM_dev->regs + i82540EM_RCTL);
 
 	// Send a test interrupt.
@@ -287,9 +294,12 @@ static void i82540EM_remove(struct pci_dev *pci_dev){
 
 		// Unmap resource associated with the pci device.
 		pci_release_regions(pci_dev);
-		pci_disable_device(pci_dev);
 
 	}
+
+//	if(pci_is_enabled(pci_dev))
+//		pci_disable_device(pci_dev);
+
 
 }
 
