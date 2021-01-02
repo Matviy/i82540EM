@@ -28,3 +28,4 @@ void uart_print(char* str){
 		_uart_print(*str++);
 	}
 }
+

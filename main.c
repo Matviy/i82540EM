@@ -6,8 +6,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/printk.h>
 
-#include "i82540EM.h"
-#include "debug_print.h"
+#include "main.h"
+#include "uart_print.h"
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -58,8 +58,6 @@ void rx_data(long unsigned int param){
 		);
 	}
 
-uart_print("A\n\x00");
-
 	// Process all done descriptors
 	// Non-zero status means descriptor is done.
 	while((tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT < head && i82540EM_dev->rx_descriptors[(tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT].status){
@@ -86,8 +84,6 @@ uart_print("A\n\x00");
 			i82540EM_dev->packet_buffer->ip_summed = CHECKSUM_UNNECESSARY;
 			i82540EM_dev->packet_buffer->dev = i82540EM_dev->net_dev;
 			i82540EM_dev->packet_buffer->protocol = eth_type_trans(i82540EM_dev->packet_buffer, i82540EM_dev->net_dev);
-
-uart_print("B\n\x00");
 
 			// Print the packet to console.
 			print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_NONE, 16, 1, i82540EM_dev->packet_buffer->data, i82540EM_dev->packet_buffer->data_len, true);
@@ -123,6 +119,8 @@ printk(KERN_INFO "F\n");
 
 static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *ent){
 
+//	prink("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n");
+
 	/*
 		pci_device ------------> Generic Device
 		/\   |			    	/\
@@ -148,8 +146,7 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	unsigned int i = 0;
 
 	printk("i82540EM: i82540EM_probe(): Device found. \n");
-
-	uart_print("i82540EM: uart_print() works!\n\x00");
+	uart_print("i82540EM: uart_print()'ing works!\n");
 
 	// Attempt to enable the pci device
 	error = pci_enable_device(pci_dev);
@@ -413,8 +410,8 @@ static void i82540EM_remove(struct pci_dev *pci_dev){
 
 	}
 
-//	if(pci_is_enabled(pci_dev))
-//		pci_disable_device(pci_dev);
+	if(pci_is_enabled(pci_dev))
+		pci_disable_device(pci_dev);
 
 
 }
@@ -427,4 +424,3 @@ static struct pci_driver i82540EM_pci_driver = {
 };
 
 module_pci_driver(i82540EM_pci_driver)
-
