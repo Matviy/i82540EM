@@ -7,6 +7,7 @@
 #include <linux/printk.h>
 
 #include "i82540EM.h"
+#include "debug_print.h"
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -42,28 +43,10 @@ void rx_data(long unsigned int param){
 	u32 head = readl(i82540EM_dev->regs + i82540EM_RDH);
 	u32 tail = readl(i82540EM_dev->regs + i82540EM_RDT);
 
-	// Debug.
+	// Debug. Dump all desriptors and head/tail information.
 	printk(KERN_INFO "Tasklet rx_data(): RDH:RDT 0x%x:0x%x\n", head, tail);
-
-	// If we don't have a packet buffer, allocate one.
-	// This can fail if out of memory.
-	if (!i82540EM_dev->packet_buffer){
-
-		// Allocate a new packet buffer.
-		i82540EM_dev->packet_buffer = dev_alloc_skb(i82540EM_SETTING_MAX_FRAME_SIZE);
-
-		// If allocation fails, do nothing. This will be re-tried on new packets,
-		// or eventually with the interrupt-causing workqueue.
-		if (!i82540EM_dev->packet_buffer){
-			dev_err(&i82540EM_dev->pci_dev->dev, "rx_data(): Error allocating kernel buffer. Aborting function.\n");
-			return;
-		}
-
-	}
-/*
-	// Debug.
 	int i = 0;
-	for(i = 0; i < 8; i++){
+	for(i = 0; i < i82540EM_SETTING_RX_BUFFER_COUNT; i++){
 		printk(KERN_INFO "rx_data(): Descriptor[%d]: Length:%x Status:%x Checksum:%x Error:%x Special: %x Buffer DMA Address: %llx\n",
 			i,
 			i82540EM_dev->rx_descriptors[i].length,
@@ -74,20 +57,25 @@ void rx_data(long unsigned int param){
 			*(void**)&i82540EM_dev->rx_descriptors[i]
 		);
 	}
-*/
+
+uart_print("A\n\x00");
 
 	// Process all done descriptors
 	// Non-zero status means descriptor is done.
-	while((tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT < head && i82540EM_dev->rx_descriptors[tail].status){
+	while((tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT < head && i82540EM_dev->rx_descriptors[(tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT].status){
 
-		// Modular increment to next valid descriptor.
-		tail = (tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT;
+		// Increment the tail pointer here, so we can use it to point to the current descriptor we're processing.
+		// This way we also avoid incrementing it later.
+		tail++;
+		tail %= i82540EM_SETTING_RX_BUFFER_COUNT;
 
-		// Add descriptor buffer data to our sk buffer.
+		// Copy descriptor data to sk buffer.
 		memcpy(skb_put(i82540EM_dev->packet_buffer,
 			       i82540EM_dev->rx_descriptors[tail].length),
-			i82540EM_dev->rx_buffers + tail * i82540EM_SETTING_RX_BUFFER_SIZE,
+			i82540EM_dev->rx_buffers + (tail) * i82540EM_SETTING_RX_BUFFER_SIZE,
 			i82540EM_dev->rx_descriptors[tail].length);
+
+		printk(KERN_INFO "Copied to buffer\n");
 
 		// If this was the last frame for the packet, send it up the networking stack.
 		if(i82540EM_dev->rx_descriptors[tail].status & i82540EM_STATUS_BITMASK_EOP){
@@ -99,26 +87,36 @@ void rx_data(long unsigned int param){
 			i82540EM_dev->packet_buffer->dev = i82540EM_dev->net_dev;
 			i82540EM_dev->packet_buffer->protocol = eth_type_trans(i82540EM_dev->packet_buffer, i82540EM_dev->net_dev);
 
-			// Send packet up the networking stack.
-			//netif_rx(i82540EM_dev->packet_buffer);
+uart_print("B\n\x00");
 
 			// Print the packet to console.
-			print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_NONE, 16, 1,
-				i82540EM_dev->packet_buffer->data,
-				i82540EM_dev->packet_buffer->data_len, true);
+			print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_NONE, 16, 1, i82540EM_dev->packet_buffer->data, i82540EM_dev->packet_buffer->data_len, true);
 
-			// Remove our reference to the buffer. New buffer will be allocated later.
-			// This is so we can drop packets if the allocation failes, which it can.
-			i82540EM_dev->packet_buffer = 0;
+			// Send packet up the networking stack.
+			//netif_rx(i82540EM_dev->packet_buffer);
+			kfree_skb(i82540EM_dev->packet_buffer); // Debug
+
+printk(KERN_INFO "C\n");
+
+			// Allocate new packet buffer.
+			// TODO: Critical bug here. This can fail. If it does, we need to
+			// figure out how to handle the descriptors. We can drop them, but then
+			// packets will be correupted until an EOP appears. Handle all of this well.
+			i82540EM_dev->packet_buffer = dev_alloc_skb(i82540EM_SETTING_MAX_FRAME_SIZE);
+
 		}
+printk(KERN_INFO "D\n");
 
 		// Set the status byte to zero so we know we handled this packet.
 		i82540EM_dev->rx_descriptors[tail].status = 0;
+printk(KERN_INFO "E\n");
 
-		// Write the already incremented tail pointer to the controller to free the descriptor.
+		// Tail is already incremented for the next loop. Update the hw ring.
 		// Barrier to ensure this happens only after status has been cleared.
 		wmb();
-		writel(i82540EM_dev->regs + i82540EM_RDT, tail);
+		writel(tail, i82540EM_dev->regs + i82540EM_RDT);
+printk(KERN_INFO "F\n");
+
 	}
 
 }
@@ -150,6 +148,8 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	unsigned int i = 0;
 
 	printk("i82540EM: i82540EM_probe(): Device found. \n");
+
+	uart_print("i82540EM: uart_print() works!\n\x00");
 
 	// Attempt to enable the pci device
 	error = pci_enable_device(pci_dev);
