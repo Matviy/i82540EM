@@ -4,6 +4,7 @@
 #include <linux/etherdevice.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
+#include <linux/printk.h>
 
 #include "i82540EM.h"
 
@@ -17,11 +18,108 @@ static const struct pci_device_id i82540EM_pci_tbl[] = {
 static irqreturn_t test_isr(int irq, void* dev_id){
 
 	struct i82540EM *i82540EM_dev = dev_id;
+	int i = 0;
 
 	u32 icr = readl(i82540EM_dev->regs + i82540EM_ICR);
 	printk(KERN_INFO "INTERRUPT! ICR: 0x%11X\n", icr);
 
+	// Schedule the rx tasklet.
+	// Multiple interrupts occuring may cause an ICR read to return zero.
+	// This is fine, as long as the ISR that got a valid value handles
+	// the cause.
+	if(icr)
+		tasklet_hi_schedule(&i82540EM_dev->rx_tasklet);
+
 	return IRQ_RETVAL(1);
+}
+
+// Tasklet function to copy data from buffers.
+// Serialized across CPUs.
+void rx_data(long unsigned int param){
+
+	struct i82540EM *i82540EM_dev = param;
+
+	u32 head = readl(i82540EM_dev->regs + i82540EM_RDH);
+	u32 tail = readl(i82540EM_dev->regs + i82540EM_RDT);
+
+	// Debug.
+	printk(KERN_INFO "Tasklet rx_data(): RDH:RDT 0x%x:0x%x\n", head, tail);
+
+	// If we don't have a packet buffer, allocate one.
+	// This can fail if out of memory.
+	if (!i82540EM_dev->packet_buffer){
+
+		// Allocate a new packet buffer.
+		i82540EM_dev->packet_buffer = dev_alloc_skb(i82540EM_SETTING_MAX_FRAME_SIZE);
+
+		// If allocation fails, do nothing. This will be re-tried on new packets,
+		// or eventually with the interrupt-causing workqueue.
+		if (!i82540EM_dev->packet_buffer){
+			dev_err(&i82540EM_dev->pci_dev->dev, "rx_data(): Error allocating kernel buffer. Aborting function.\n");
+			return;
+		}
+
+	}
+/*
+	// Debug.
+	int i = 0;
+	for(i = 0; i < 8; i++){
+		printk(KERN_INFO "rx_data(): Descriptor[%d]: Length:%x Status:%x Checksum:%x Error:%x Special: %x Buffer DMA Address: %llx\n",
+			i,
+			i82540EM_dev->rx_descriptors[i].length,
+			i82540EM_dev->rx_descriptors[i].status,
+			i82540EM_dev->rx_descriptors[i].checksum,
+			i82540EM_dev->rx_descriptors[i].errors,
+			i82540EM_dev->rx_descriptors[i].special,
+			*(void**)&i82540EM_dev->rx_descriptors[i]
+		);
+	}
+*/
+
+	// Process all done descriptors
+	// Non-zero status means descriptor is done.
+	while((tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT < head && i82540EM_dev->rx_descriptors[tail].status){
+
+		// Modular increment to next valid descriptor.
+		tail = (tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT;
+
+		// Add descriptor buffer data to our sk buffer.
+		memcpy(skb_put(i82540EM_dev->packet_buffer,
+			       i82540EM_dev->rx_descriptors[tail].length),
+			i82540EM_dev->rx_buffers + tail * i82540EM_SETTING_RX_BUFFER_SIZE,
+			i82540EM_dev->rx_descriptors[tail].length);
+
+		// If this was the last frame for the packet, send it up the networking stack.
+		if(i82540EM_dev->rx_descriptors[tail].status & i82540EM_STATUS_BITMASK_EOP){
+
+			printk(KERN_INFO "rx_data(): EOP detected\n");
+
+			// Set metadata
+			i82540EM_dev->packet_buffer->ip_summed = CHECKSUM_UNNECESSARY;
+			i82540EM_dev->packet_buffer->dev = i82540EM_dev->net_dev;
+			i82540EM_dev->packet_buffer->protocol = eth_type_trans(i82540EM_dev->packet_buffer, i82540EM_dev->net_dev);
+
+			// Send packet up the networking stack.
+			//netif_rx(i82540EM_dev->packet_buffer);
+
+			// Print the packet to console.
+			print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_NONE, 16, 1,
+				i82540EM_dev->packet_buffer->data,
+				i82540EM_dev->packet_buffer->data_len, true);
+
+			// Remove our reference to the buffer. New buffer will be allocated later.
+			// This is so we can drop packets if the allocation failes, which it can.
+			i82540EM_dev->packet_buffer = 0;
+		}
+
+		// Set the status byte to zero so we know we handled this packet.
+		i82540EM_dev->rx_descriptors[tail].status = 0;
+
+		// Write the already incremented tail pointer to the controller to free the descriptor.
+		// Barrier to ensure this happens only after status has been cleared.
+		wmb();
+		writel(i82540EM_dev->regs + i82540EM_RDT, tail);
+	}
 
 }
 
@@ -51,7 +149,7 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	// Counter.
 	unsigned int i = 0;
 
-	printk("i82540EM: i82540EM_probe(): Deivce found. \n");
+	printk("i82540EM: i82540EM_probe(): Device found. \n");
 
 	// Attempt to enable the pci device
 	error = pci_enable_device(pci_dev);
@@ -90,6 +188,10 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	i82540EM_dev->net_dev = net_dev;
 	i82540EM_dev->pci_dev = pci_dev;
 
+	// Initialize the RX tasklet.
+	// Must be done before interrupts are enabled.
+	tasklet_init(&i82540EM_dev->rx_tasklet, rx_data, i82540EM_dev);
+
 	// Attempt to map the BAR registers
 	i82540EM_dev->regs = pci_ioremap_bar(pci_dev, BAR_0);
 	if(!i82540EM_dev->regs){
@@ -104,7 +206,13 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 
 	// Reset the device.
 	writel(i82540EM_CTRL_BITMASK_RST, i82540EM_dev->regs + i82540EM_CTRL);
-	udelay(100);
+	udelay(1000);
+
+	// Wait for reset to complete.
+	while(readl(i82540EM_dev->regs + i82540EM_CTRL) & i82540EM_CTRL_BITMASK_RST){
+		printk(KERN_INFO "Waiting for reset bit to clear.\n");
+		udelay(100);
+	}
 
 	// The ICS register isn't cleared on reset, unread pending interrupts here
 	// will prevent new interrupts from being issued. So read the register to clear it.
@@ -169,46 +277,54 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	//writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_IMS);
 
 	// Request the IRQ and register the handler here.
+	printk(KERN_INFO "Requested IRQ\n");
 	error = request_irq(pci_dev->irq, test_isr, IRQF_SHARED, "i82540EM", i82540EM_dev);
 	if(error){
 		dev_err(&pci_dev->dev, "Failed requesting IRQ, exiting.\n");
 		goto err_request_irq;
 	}
+	printk(KERN_INFO "Got the IRQ\n");
 
 	// Record that we accquired an IRQ, for releasing later.
 	i82540EM_dev->irq_accquired = 1;
 
 	// Initialize the rx descriptors.
+	// Give each descriptor a buffer address in a cross platform way.
+	// Initialize status to zero, just in case.
 	for (i = 0; i < i82540EM_SETTING_RX_BUFFER_COUNT; i++){
-		i82540EM_dev->rx_descriptors[i].addr_high =
-			((u64)&i82540EM_dev->rx_buffers[i * i82540EM_SETTING_RX_BUFFER_SIZE] >> 32);
-
-		i82540EM_dev->rx_descriptors[i].addr_low  =
-			((u64)&i82540EM_dev->rx_buffers[i * i82540EM_SETTING_RX_BUFFER_SIZE] & 0xFFFFFFFF);
+		*(void**)(i82540EM_dev->rx_descriptors + i) = (void*)(i82540EM_dev->rx_buffers_dma_handle + i * i82540EM_SETTING_RX_BUFFER_SIZE);
+		i82540EM_dev->rx_descriptors[i].status = 0;
 	}
 
-	// Write the address of the rx descriptor ring.
+	// Give the controller the address of the rx descriptor ring.
 	writel(i82540EM_dev->rx_descriptors_dma_handle & 0xFFFFFFFF, i82540EM_dev->regs + i82540EM_RDBAL);
 	writel(i82540EM_dev->rx_descriptors_dma_handle >> 32, i82540EM_dev->regs + i82540EM_RDBAH);
 
-	// Write the length of the descriptor ring (in bytes). Must be a 128-byte aligned.
-	// As a rx descriptor has fixed len of 16, must have a multiple of 8 rx descriptors.
+	// Give the controller hte length of the rx descriptor ring in bytes.
+	// Length must be a multiple of 128. WIth 16-byte descriptors, this means n*8 descriptors.
 	writel(i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE, i82540EM_dev->regs + i82540EM_RDLEN);
 
-	// Initialize the head and tail registers here to zero.
-	// They should be zero post-reset, but do it just in case.
+	// Initialize the head and tail pointers, which are both zero on reset.
+	// RDH == RDT indicates empty ring, hw halts until new descriptors are added.
+	// RDT == RDH-1 indicates a full ring, hardware can write to descriptors.
+	// So initialize RDH to zero, and RDT to the last descriptor.
 	writel(0, i82540EM_dev->regs + i82540EM_RDH);
-	writel(0, i82540EM_dev->regs + i82540EM_RDT);
+	writel(i82540EM_SETTING_RX_BUFFER_COUNT-1, i82540EM_dev->regs + i82540EM_RDT);
 
-	// Enable the receiver. This is the last step to start receiving packets.
+	// Configure and enable the receiver.
+	// This is the last step to start receiving packets.
 	u32 rctl = readl(i82540EM_dev->regs + i82540EM_RCTL);
-	rctl |= (i82540EM_RCTL_BITMASK_EN | i82540EM_RCTL_BITMASK_BAM | i82540EM_RCTL_BITMASK_UPE);
+	rctl |= (i82540EM_RCTL_BITMASK_EN  |
+		 i82540EM_RCTL_BITMASK_BAM |
+		 i82540EM_RCTL_BITMASK_UPE |
+		 i82540EM_RCTL_BITMASK_MPE );
 	writel(rctl, i82540EM_dev->regs + i82540EM_RCTL);
 
-	// Send a test interrupt.
-	printk(KERN_INFO "i82540EM: Sending test interrupt.\n");
-	writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_ICS);
+	// Send test interrupt if desired.
+	//printk(KERN_INFO "i82540EM: Sending test interrupt.\n");
+	//writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_ICS);
 
+	// Done!
 	printk(KERN_INFO "i82540EM: Init completed successfully.\n");
 
 	return 0;

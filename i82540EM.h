@@ -85,19 +85,43 @@
 #define i82540EM_RDH 0x2810 // Recieve Descriptor Head.
 #define i82540EM_RDT 0x2818 // Receive Descritor Tail.
 
+#define i82540EM_STATUS_BITMASK_DD  	0x1 	// Descriptor Done
+#define i82540EM_STATUS_BITMASK_EOP 	0x2	// End-of-Packet
+#define i82540EM_STATUS_BITMASK_IXSM 	0x4	// Ignore Checksum Indication
+#define i82540EM_STATUS_BITMASK_VP   	0x8	// Packet is 802.1Q
+#define i82540EM_STATUS_BITMASK_RSV  	0x10	// Reserved
+#define i82540EM_STATUS_BITMASK_TCPCS 	0x20	// TCP Checksum Calculated on Packet
+#define i82540EM_STATUS_BITMASK_IPCS 	0x40	// IP Checksum Calculated on Packet
+#define i82540EM_STATUS_BITMASK_PIF 	0x80	// Passed in-exact filer
+
+
+
 #define i82540EM_RX_DESCRIPTOR_SIZE sizeof(struct i82540EM_rx_descriptor) // Size of receive descriptor
 
-#define i82540EM_SETTING_RX_BUFFER_COUNT 256 // Number of desired receive buffers
-#define i82540EM_SETTING_RX_BUFFER_SIZE 2048 // Default (on-reset) size of buffers.
+// Number of buffers, equal the number of descriptors.
+// Must be multiple of 8.
+#define i82540EM_SETTING_RX_BUFFER_COUNT 8
+
+// Size of the buffers. Set in RCTL BSIZE, default is 2048.
+// We keep it default to avoid unnecessary setup.
+#define i82540EM_SETTING_RX_BUFFER_SIZE 2048
+
+// Defult size of skb to prevent resizing, accepts jumbo frames.
+#define i82540EM_SETTING_MAX_FRAME_SIZE 10000
 
 struct i82540EM_rx_descriptor{
-	u32 addr_high;
-	u32 addr_low;
-	u16 special;
-	u8  errors;
-	u8  status;
-	u16 checksum;
+
+	// 64-bit address field.
+	// Which 32-bit part holds the high and low parts of the address
+	// depends on endianness. Although we can safely assume LE, it's
+	// not technically accurate.
+	char buffer_address[8];
+
 	u16 length;
+	u16 checksum;
+	u8  status;
+	u8  errors;
+	u16 special;
 };
 
 struct i82540EM{
@@ -117,8 +141,6 @@ struct i82540EM{
 
 	// Pointer to receive descriptor ring
 	struct i82540EM_rx_descriptor *rx_descriptors;
-
-	// DMA handle to the rx descriptor ring
 	dma_addr_t rx_descriptors_dma_handle;
 
 	// Receive buffers.
@@ -127,6 +149,14 @@ struct i82540EM{
 
 	// IRQ accquired
 	char irq_accquired;
+
+	// Tasklet structure for receiving packets.
+	struct tasklet_struct rx_tasklet;
+
+	// In-progress packet buffer
+	struct sk_buff *packet_buffer;
+
+
 
 };
 
