@@ -1,1 +1,1 @@
-void uart_print(char*);
+void uart_print(char *fmt, ...);

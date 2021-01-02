@@ -1,7 +1,10 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
+
+#define BUF_SIZE 512
 
 void _uart_print(char character){
 	asm volatile(
@@ -21,11 +24,33 @@ void _uart_print(char character){
 	);
 }
 
-// Uses the uart to print a null-terminated string.
-// If it's not null terminated, you're gonna goof.
-void uart_print(char* str){
-	while(*str){
-		_uart_print(*str++);
+void static_print(char* text){
+	while(*text){
+		_uart_print(*text++);
 	}
 }
 
+void uart_print(char* fmt, ...){
+
+	va_list args;
+
+	// Allocate sprint buffer.
+	// If BUF_SIZE isn't enough, message will becut.
+	char *str_buf = kmalloc(BUF_SIZE, GFP_ATOMIC);
+	char *orig_buf = str_buf;
+	if(!str_buf){
+		static_print("uart_print(): Failed to allocate kernel buffer for snprintf().\n\0");
+		return;
+	}
+
+	va_start(args, fmt);
+	snprintf(str_buf, BUF_SIZE, fmt, args);
+	va_end(args);
+
+	// Print the string.
+	while(*str_buf)
+		_uart_print(*str_buf++);
+
+	kfree(orig_buf);
+
+}

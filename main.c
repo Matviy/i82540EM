@@ -4,7 +4,6 @@
 #include <linux/etherdevice.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
-#include <linux/printk.h>
 
 #include "main.h"
 #include "uart_print.h"
@@ -21,8 +20,12 @@ static irqreturn_t test_isr(int irq, void* dev_id){
 	struct i82540EM *i82540EM_dev = dev_id;
 	int i = 0;
 
+	uart_print("test_isr(): A\n");
+
 	u32 icr = readl(i82540EM_dev->regs + i82540EM_ICR);
-	printk(KERN_INFO "INTERRUPT! ICR: 0x%11X\n", icr);
+	uart_print("INTERRUPT! ICR: 0x%11X\n", icr);
+
+	uart_print("test_isr(): B\n");
 
 	// Schedule the rx tasklet.
 	// Multiple interrupts occuring may cause an ICR read to return zero.
@@ -30,6 +33,8 @@ static irqreturn_t test_isr(int irq, void* dev_id){
 	// the cause.
 	if(icr)
 		tasklet_hi_schedule(&i82540EM_dev->rx_tasklet);
+
+	uart_print("test_isr(): C\n");
 
 	return IRQ_RETVAL(1);
 }
@@ -43,11 +48,13 @@ void rx_data(long unsigned int param){
 	u32 head = readl(i82540EM_dev->regs + i82540EM_RDH);
 	u32 tail = readl(i82540EM_dev->regs + i82540EM_RDT);
 
+	uart_print("rx_data(): A\n");
+
 	// Debug. Dump all desriptors and head/tail information.
-	printk(KERN_INFO "Tasklet rx_data(): RDH:RDT 0x%x:0x%x\n", head, tail);
+	uart_print("Tasklet rx_data(): RDH:RDT 0x%x:0x%x\n", head, tail);
 	int i = 0;
 	for(i = 0; i < i82540EM_SETTING_RX_BUFFER_COUNT; i++){
-		printk(KERN_INFO "rx_data(): Descriptor[%d]: Length:%x Status:%x Checksum:%x Error:%x Special: %x Buffer DMA Address: %llx\n",
+		uart_print("rx_data(): Descriptor[%d]: Length:%x Status:%x Checksum:%x Error:%x Special: %x Buffer DMA Address: %llx\n",
 			i,
 			i82540EM_dev->rx_descriptors[i].length,
 			i82540EM_dev->rx_descriptors[i].status,
@@ -58,14 +65,42 @@ void rx_data(long unsigned int param){
 		);
 	}
 
+	uart_print("rx_data(): B\n");
+
 	// Process all done descriptors
 	// Non-zero status means descriptor is done.
-	while((tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT < head && i82540EM_dev->rx_descriptors[(tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT].status){
+	while((tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT != head && i82540EM_dev->rx_descriptors[(tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT].status){
+
+		uart_print("rx_data(): C\n");
+
+		// Before processing the descriptor (incrementing tail, make sure we have or can allocate
+		// an sk packet buffer for it. If not, don't touch the descriptor. Drops will be done on new packets
+		// in the controller FIFO, not in descriptors already written.
+		if (!i82540EM_dev->packet_buffer){
+
+			uart_print("rx_data(): Allocating packet buffer\n");
+
+			// Allocate
+			i82540EM_dev->packet_buffer = dev_alloc_skb(i82540EM_SETTING_MAX_FRAME_SIZE);
+
+			// If we failed to allocate the packet buffer, do nothing.
+			// Another attempt will be made next time around. Frames will remain
+			// in the descriptor to prevent breaking packets. Controller FIFO drops will occur.
+			if(!i82540EM_dev->packet_buffer){
+				uart_print("rx_data(): Failed to allocate packet buffer\n");
+				return;
+			}
+
+			uart_print("rx_data(): Allocated!\n");
+
+		}
 
 		// Increment the tail pointer here, so we can use it to point to the current descriptor we're processing.
 		// This way we also avoid incrementing it later.
 		tail++;
 		tail %= i82540EM_SETTING_RX_BUFFER_COUNT;
+
+		uart_print("rx_data(): D\n");
 
 		// Copy descriptor data to sk buffer.
 		memcpy(skb_put(i82540EM_dev->packet_buffer,
@@ -73,12 +108,16 @@ void rx_data(long unsigned int param){
 			i82540EM_dev->rx_buffers + (tail) * i82540EM_SETTING_RX_BUFFER_SIZE,
 			i82540EM_dev->rx_descriptors[tail].length);
 
-		printk(KERN_INFO "Copied to buffer\n");
+		uart_print("rx_data(): E\n");
+
+		uart_print("Copied to buffer\n");
 
 		// If this was the last frame for the packet, send it up the networking stack.
 		if(i82540EM_dev->rx_descriptors[tail].status & i82540EM_STATUS_BITMASK_EOP){
 
-			printk(KERN_INFO "rx_data(): EOP detected\n");
+			uart_print("rx_data(): EOP detected\n");
+
+			uart_print("rx_data(): F\n");
 
 			// Set metadata
 			i82540EM_dev->packet_buffer->ip_summed = CHECKSUM_UNNECESSARY;
@@ -92,28 +131,31 @@ void rx_data(long unsigned int param){
 			//netif_rx(i82540EM_dev->packet_buffer);
 			kfree_skb(i82540EM_dev->packet_buffer); // Debug
 
-printk(KERN_INFO "C\n");
+			// Remove our reference to the packet buffer, the kernel will free it.
+			// Will be reallocated on next iteration.
+			i82540EM_dev->packet_buffer = 0;
 
-			// Allocate new packet buffer.
-			// TODO: Critical bug here. This can fail. If it does, we need to
-			// figure out how to handle the descriptors. We can drop them, but then
-			// packets will be correupted until an EOP appears. Handle all of this well.
-			i82540EM_dev->packet_buffer = dev_alloc_skb(i82540EM_SETTING_MAX_FRAME_SIZE);
+			uart_print("rx_data(): G\n");
 
 		}
-printk(KERN_INFO "D\n");
+
+		uart_print("rx_data(): I\n");
 
 		// Set the status byte to zero so we know we handled this packet.
 		i82540EM_dev->rx_descriptors[tail].status = 0;
-printk(KERN_INFO "E\n");
+
+		uart_print("rx_data(): J\n");
 
 		// Tail is already incremented for the next loop. Update the hw ring.
 		// Barrier to ensure this happens only after status has been cleared.
 		wmb();
 		writel(tail, i82540EM_dev->regs + i82540EM_RDT);
-printk(KERN_INFO "F\n");
+
+		uart_print("rx_data(): K\n");
 
 	}
+
+	uart_print("rx_data(): L\n");
 
 }
 
@@ -145,8 +187,9 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	// Counter.
 	unsigned int i = 0;
 
-	printk("i82540EM: i82540EM_probe(): Device found. \n");
+	uart_print("i82540EM: i82540EM_probe(): Device found. \n");
 	uart_print("i82540EM: uart_print()'ing works!\n");
+	uart_print("i82540EM: testing %x\n", 0xDEAD);
 
 	// Attempt to enable the pci device
 	error = pci_enable_device(pci_dev);
@@ -207,7 +250,7 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 
 	// Wait for reset to complete.
 	while(readl(i82540EM_dev->regs + i82540EM_CTRL) & i82540EM_CTRL_BITMASK_RST){
-		printk(KERN_INFO "Waiting for reset bit to clear.\n");
+		uart_print("Waiting for reset bit to clear.\n");
 		udelay(100);
 	}
 
@@ -274,13 +317,13 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	//writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_IMS);
 
 	// Request the IRQ and register the handler here.
-	printk(KERN_INFO "Requested IRQ\n");
+	uart_print("Requested IRQ\n");
 	error = request_irq(pci_dev->irq, test_isr, IRQF_SHARED, "i82540EM", i82540EM_dev);
 	if(error){
 		dev_err(&pci_dev->dev, "Failed requesting IRQ, exiting.\n");
 		goto err_request_irq;
 	}
-	printk(KERN_INFO "Got the IRQ\n");
+	uart_print("Got the IRQ\n");
 
 	// Record that we accquired an IRQ, for releasing later.
 	i82540EM_dev->irq_accquired = 1;
@@ -318,11 +361,11 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	writel(rctl, i82540EM_dev->regs + i82540EM_RCTL);
 
 	// Send test interrupt if desired.
-	//printk(KERN_INFO "i82540EM: Sending test interrupt.\n");
+	//uart_print("i82540EM: Sending test interrupt.\n");
 	//writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_ICS);
 
 	// Done!
-	printk(KERN_INFO "i82540EM: Init completed successfully.\n");
+	uart_print("i82540EM: Init completed successfully.\n");
 
 	return 0;
 
@@ -361,7 +404,7 @@ err_pci_enable_device:
 
 static void i82540EM_remove(struct pci_dev *pci_dev){
 
-	printk("i82540EM: i82540EM_remove(): Removing device.\n");
+	uart_print("i82540EM: i82540EM_remove(): Removing device.\n");
 
 	// Get the net_device assigned to this pci_dev device.
 	struct net_device *net_dev = pci_get_drvdata(pci_dev);
