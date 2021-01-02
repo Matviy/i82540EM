@@ -44,7 +44,7 @@ void uart_print(char* fmt, ...){
 	}
 
 	va_start(args, fmt);
-	snprintf(str_buf, BUF_SIZE, fmt, args);
+	vsnprintf(str_buf, BUF_SIZE, fmt, args);
 	va_end(args);
 
 	// Print the string.
