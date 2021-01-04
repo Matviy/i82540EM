@@ -257,13 +257,7 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	// ~PHY_RST
 	// ~ILOS
 	// ~VME
-	writel((i82540EM_CTRL_BITMASK_ASDE 	|
-		i82540EM_CTRL_BITMASK_SLU)
-		       	&
-	      ~(i82540EM_CTRL_BITMASK_PHY_RST 	|
-		i82540EM_CTRL_BITMASK_ILOS 	|
-		i82540EM_CTRL_BITMASK_VME)	,
-		i82540EM_dev->regs + i82540EM_CTRL);
+	writel(i82540EM_CTRL_BITMASK_ASDE | i82540EM_CTRL_BITMASK_SLU, i82540EM_dev->regs + i82540EM_CTRL);
 
 	// Initialize flow control registers to zero as per documentation.
 	writel(0, i82540EM_dev->regs + i82540EM_FCAL);
