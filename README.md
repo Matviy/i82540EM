@@ -1,1 +1,1 @@
-Basic interrupt-driven 82540EM driver
+Interrupt-driven 82540EM driver
