@@ -110,10 +110,10 @@ static const char ETHERNET_ADDRESS[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
 #define i82540EM_RX_STATUS_BITMASK_IPCS 	0x40		// IP Checksum Calculated on Packet
 #define i82540EM_RX_STATUS_BITMASK_PIF 		0x80		// Passed in-exact filer
 
-#define i82540EM_TX_STATUS_BITMASK_DD		0x1		// Descriptor done
-#define i82540EM_TX_STATUS_BITMASK_EC		0x2		// Excess collisions
-#define i82540EM_TX_STATUS_BITMASK_LC		0x4		// Late collision
-#define i82540EM_TX_STATUS_BITMASK_TU		0x8		// Transmit underrun
+#define i82540EM_TX_STATUS_BITMASK_DD		0x1 		// Descriptor done
+#define i82540EM_TX_STATUS_BITMASK_EC		0x2 		// Excess collisions
+#define i82540EM_TX_STATUS_BITMASK_LC		0x4 		// Late collision
+#define i82540EM_TX_STATUS_BITMASK_TU		0x8 		// Transmit underrun
 
 #define i82540EM_TX_COMMAND_BITMASK_EOP		0x1		// End Of Packet
 #define i82540EM_TX_COMMAND_BITMASK_IFCS	0x2		// Insert FCS
@@ -129,8 +129,8 @@ static const char ETHERNET_ADDRESS[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
 
 // Number of buffers, equal the number of descriptors.
 // Must be multiple of 8.
-#define i82540EM_SETTING_RX_BUFFER_COUNT 8
-#define i82540EM_SETTING_TX_BUFFER_COUNT 8
+#define i82540EM_SETTING_RX_BUFFER_COUNT 256
+#define i82540EM_SETTING_TX_BUFFER_COUNT 256
 
 // Default size in RCTL, > MTU.
 #define i82540EM_SETTING_RX_BUFFER_SIZE  2048
@@ -205,7 +205,7 @@ struct i82540EM{
 
 	// In-progress packet buffer
 	struct sk_buff *rx_skb_buffer;
-	struct sk_buff *tx_skb_buffer;
+//	struct sk_buff *tx_skb_buffer;
 
 
 };

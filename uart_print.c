@@ -5,6 +5,7 @@
 MODULE_LICENSE("Dual BSD/GPL");
 
 #define BUF_SIZE 512
+//#define DEBUG
 
 void _uart_print(char character){
 	asm volatile(
@@ -32,6 +33,10 @@ void static_print(char* text){
 
 void uart_print(char* fmt, ...){
 
+#ifndef DEBUG
+	return;
+#endif
+
 	va_list args;
 
 	// Allocate sprint buffer.
@@ -54,7 +59,6 @@ void uart_print(char* fmt, ...){
 }
 
 void buffer_uart_print(char* buffer, uint length, uint columns){
-
 	int i;
 	for(i = 1; i < length+1; i++){
 		uart_print("%.2hhx ", buffer[i-1]);
