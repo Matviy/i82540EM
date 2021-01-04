@@ -10,6 +10,8 @@
 
 MODULE_LICENSE("Dual BSD/GPL");
 
+static const struct net_device_ops i82540EM_net_ops;
+
 static const struct pci_device_id i82540EM_pci_tbl[] = {
 	{PCI_DEVICE(i82540EM_VENDOR, i82540EM_DEVICE)},
 	{}
@@ -18,7 +20,6 @@ static const struct pci_device_id i82540EM_pci_tbl[] = {
 static irqreturn_t i82540EM_isr(int irq, void* dev_id){
 
 	struct i82540EM *i82540EM_dev = dev_id;
-	int i = 0;
 
 	u32 icr = readl(i82540EM_dev->regs + i82540EM_ICR);
 	uart_print("i82540EM_isr(): Interrupt cause: 0x%11X\n", icr);
@@ -35,18 +36,19 @@ static irqreturn_t i82540EM_isr(int irq, void* dev_id){
 
 // Tasklet function to copy data from buffers.
 // Serialized across CPUs.
-void rx_data(long unsigned int param){
+void rx_data(unsigned long int param){
 
-	struct i82540EM *i82540EM_dev = param;
+	struct i82540EM *i82540EM_dev = (struct i82540EM*)param;
+
+	int i = 0;
 
 	u32 head = readl(i82540EM_dev->regs + i82540EM_RDH);
 	u32 tail = readl(i82540EM_dev->regs + i82540EM_RDT);
 
 	// Debug. Dump all desriptors and head/tail information.
 	uart_print("rx_data(): Tail: %d Head: %d\n", tail, head);
-	int i = 0;
 	for(i = 0; i < i82540EM_SETTING_RX_BUFFER_COUNT; i++){
-		uart_print("rx_data(): Descriptor[%d]: Length:%x Status:%x Checksum:%x Error:%x Special: %x Buffer DMA Address: %llx\n",
+		uart_print("rx_data(): Descriptor[%d]: Length:%d Status:%x Checksum:%x Error:%x Special: %x Buffer DMA Address: %llx\n",
 			i,
 			i82540EM_dev->rx_descriptors[i].length,
 			i82540EM_dev->rx_descriptors[i].status,
@@ -61,11 +63,10 @@ void rx_data(long unsigned int param){
 	while((tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT != head && i82540EM_dev->rx_descriptors[(tail + 1) % i82540EM_SETTING_RX_BUFFER_COUNT].status){
 
 		// Allocate new packet buffer if needed. If it fails, don't process descriptors.
-		if (!i82540EM_dev->packet_buffer){
+		if (!i82540EM_dev->rx_skb_buffer){
 
-			i82540EM_dev->packet_buffer = dev_alloc_skb(i82540EM_SETTING_MAX_FRAME_SIZE);
-
-			if(!i82540EM_dev->packet_buffer){
+			i82540EM_dev->rx_skb_buffer = dev_alloc_skb(i82540EM_SETTING_ETHERNET_MTU);
+			if(!i82540EM_dev->rx_skb_buffer){
 				uart_print("rx_data(): Failed to allocate packet buffer\n");
 				return;
 			}
@@ -76,31 +77,39 @@ void rx_data(long unsigned int param){
 		tail++;
 		tail %= i82540EM_SETTING_RX_BUFFER_COUNT;
 
-		// Copy descriptor data to sk buffer.
-		memcpy(skb_put(i82540EM_dev->packet_buffer,i82540EM_dev->rx_descriptors[tail].length),
-			i82540EM_dev->rx_buffers + (tail) * i82540EM_SETTING_RX_BUFFER_SIZE,
+		uart_print("\n");
+		buffer_uart_print(i82540EM_dev->rx_buffers + tail * i82540EM_SETTING_RX_BUFFER_SIZE, i82540EM_dev->rx_descriptors[tail].length, 16);
+		uart_print("\n");
+
+		// Copy data to packet buffer.
+		memcpy(skb_put(i82540EM_dev->rx_skb_buffer, i82540EM_dev->rx_descriptors[tail].length),
+			i82540EM_dev->rx_buffers + tail * i82540EM_SETTING_RX_BUFFER_SIZE,
 			i82540EM_dev->rx_descriptors[tail].length);
 
 		// If end of packet, send it up the stack.
-		if(i82540EM_dev->rx_descriptors[tail].status & i82540EM_STATUS_BITMASK_EOP){
+		if(i82540EM_dev->rx_descriptors[tail].status & i82540EM_RX_STATUS_BITMASK_EOP){
 
-			uart_print("rx_data(): EOP detected\n");
+			// Dump complete packet. Debug.
+			uart_print("rx_data(): Dumping RX data.\n:");
+			uart_print("rx_data(): rx_skb_buffer address: %llx\n", 			i82540EM_dev->rx_skb_buffer);
+			uart_print("rx_data(): rx_skb_buffer->len: %d\n", 			i82540EM_dev->rx_skb_buffer->len);
+			uart_print("rx_data(): rx_skb_buffer->head address: %llx\n", 		i82540EM_dev->rx_skb_buffer->head);
+			uart_print("rx_data(): rx_skb_buffer->head physical address: %llx\n", 	virt_to_phys(i82540EM_dev->rx_skb_buffer->head));
+			uart_print("rx_data(): RX packet bytes:\n");
+			buffer_uart_print(i82540EM_dev->rx_skb_buffer->head, i82540EM_dev->rx_skb_buffer->len, 16);
+			uart_print("\n");
 
 			// Set metadata
-			i82540EM_dev->packet_buffer->ip_summed = CHECKSUM_UNNECESSARY;
-			i82540EM_dev->packet_buffer->dev = i82540EM_dev->net_dev;
-			i82540EM_dev->packet_buffer->protocol = eth_type_trans(i82540EM_dev->packet_buffer, i82540EM_dev->net_dev);
-
-			// Print the packet to console.
-			print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_NONE, 16, 1, i82540EM_dev->packet_buffer->data, i82540EM_dev->packet_buffer->data_len, true);
+			i82540EM_dev->rx_skb_buffer->ip_summed = CHECKSUM_UNNECESSARY;
+			i82540EM_dev->rx_skb_buffer->dev = i82540EM_dev->net_dev;
+			i82540EM_dev->rx_skb_buffer->protocol = eth_type_trans(i82540EM_dev->rx_skb_buffer, i82540EM_dev->net_dev);
 
 			// Send packet up the networking stack.
-			//netif_rx(i82540EM_dev->packet_buffer);
-			kfree_skb(i82540EM_dev->packet_buffer); // Debug
+			netif_rx(i82540EM_dev->rx_skb_buffer);
 
 			// Remove our reference to the packet buffer, the kernel will free it.
 			// Will be reallocated on next iteration.
-			i82540EM_dev->packet_buffer = 0;
+			i82540EM_dev->rx_skb_buffer = 0;
 
 		}
 
@@ -114,6 +123,40 @@ void rx_data(long unsigned int param){
 
 	}
 
+}
+
+static void i82540EM_unmap_dma_mappings(struct i82540EM *i82540EM_dev){
+
+	if(i82540EM_dev->rx_descriptors)
+		dma_free_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE, i82540EM_dev->rx_descriptors, i82540EM_dev->rx_descriptors_dma_handle);
+	if(i82540EM_dev->tx_descriptors)
+		dma_free_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_TX_BUFFER_COUNT * i82540EM_TX_DESCRIPTOR_SIZE, i82540EM_dev->tx_descriptors, i82540EM_dev->tx_descriptors_dma_handle);
+	if(i82540EM_dev->rx_buffers)
+		dma_free_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_SETTING_RX_BUFFER_SIZE, i82540EM_dev->rx_buffers, i82540EM_dev->rx_buffers_dma_handle);
+	if(i82540EM_dev->tx_buffers)
+		dma_free_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_TX_BUFFER_COUNT * i82540EM_SETTING_TX_BUFFER_SIZE, i82540EM_dev->tx_buffers, i82540EM_dev->tx_buffers_dma_handle);
+
+	i82540EM_dev->rx_descriptors = 0;
+	i82540EM_dev->tx_descriptors = 0;
+	i82540EM_dev->rx_buffers = 0;
+	i82540EM_dev->tx_buffers = 0;
+}
+
+static int i82540EM_init_dma_mappings(struct i82540EM *i82540EM_dev){
+
+	// Allocate DMA mapping for the tx/rx descriptor rings and buffers.
+	i82540EM_dev->rx_descriptors 	= dma_alloc_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE, &i82540EM_dev->rx_descriptors_dma_handle, GFP_KERNEL);
+	i82540EM_dev->tx_descriptors 	= dma_alloc_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_TX_BUFFER_COUNT * i82540EM_TX_DESCRIPTOR_SIZE, &i82540EM_dev->tx_descriptors_dma_handle, GFP_KERNEL);
+	i82540EM_dev->rx_buffers 	= dma_alloc_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_SETTING_RX_BUFFER_SIZE, &i82540EM_dev->rx_buffers_dma_handle, GFP_KERNEL);
+	i82540EM_dev->tx_buffers 	= dma_alloc_coherent(&i82540EM_dev->pci_dev->dev, i82540EM_SETTING_TX_BUFFER_COUNT * i82540EM_SETTING_TX_BUFFER_SIZE, &i82540EM_dev->tx_buffers_dma_handle, GFP_KERNEL);
+
+	if(!i82540EM_dev->rx_descriptors || !i82540EM_dev->tx_descriptors || !i82540EM_dev->rx_buffers || !i82540EM_dev->tx_buffers){
+		i82540EM_unmap_dma_mappings(i82540EM_dev);
+		dev_err(&i82540EM_dev->pci_dev->dev, "Failed to allocate DMA mappings. Exiting.\n");
+		return -ENOMEM;
+	}
+
+	return 1;
 }
 
 static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *ent){
@@ -177,9 +220,12 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	i82540EM_dev->net_dev = net_dev;
 	i82540EM_dev->pci_dev = pci_dev;
 
-	// RX Tasklet must be initialized before interrupts are enabled.
-	tasklet_init(&i82540EM_dev->rx_tasklet, rx_data, i82540EM_dev);
+	// Pass the net device it's operation struct.
+ 	net_dev->netdev_ops = &i82540EM_net_ops;
 
+	spin_lock_init(&i82540EM_dev->lock);
+
+	// Map the BARs.
 	i82540EM_dev->regs = pci_ioremap_bar(pci_dev, BAR_0);
 	if(!i82540EM_dev->regs){
 		dev_err(&pci_dev->dev, "Error mapping BAR 0 registers, exiting\n");
@@ -188,52 +234,29 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 
 	}
 
-	spin_lock_init(&i82540EM_dev->lock);
-
 	// Reset the device to bring all registers into default state.
+	// Wait loop needed as per doc.
 	writel(i82540EM_CTRL_BITMASK_RST, i82540EM_dev->regs + i82540EM_CTRL);
 	udelay(1000);
-
-	// Documentation says reset requires a wait.
 	while(readl(i82540EM_dev->regs + i82540EM_CTRL) & i82540EM_CTRL_BITMASK_RST){
 		uart_print("Waiting for reset bit to clear.\n");
 		udelay(100);
 	}
 
-	// Clear pending interrupts.
-	readl(i82540EM_dev->regs + i82540EM_ICR);
-
-	// Allocate DMA mapping for the rx descriptor ring.
-	i82540EM_dev->rx_descriptors = dma_alloc_coherent(
-					&pci_dev->dev,
-					i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE,
-					&i82540EM_dev->rx_descriptors_dma_handle,
-					GFP_KERNEL);
-
-	if(!i82540EM_dev->rx_descriptors){
-		dev_err(&pci_dev->dev, "Failed requesting DMA mapping for RX descriptor rings, exiting.\n");
-		error = -ENOMEM;
-		goto err_rx_descriptor_dma_alloc_coherent;
-	}
-
-	// Allocate DMA mapping for the receive buffers.
-	i82540EM_dev->rx_buffers = dma_alloc_coherent(
-				    &pci_dev->dev,
-				    i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_SETTING_RX_BUFFER_SIZE,
-				    &i82540EM_dev->rx_buffers_dma_handle,
-			   	    GFP_KERNEL);
-
-	if(!i82540EM_dev->rx_buffers){
-		dev_err(&pci_dev->dev, "Failed requesting DMA mapping for RX buffers, exiting.\n");
-		error = -ENOMEM;
-		goto err_rx_buffers_dma_alloc_coherent;
-	}
-
-	// Program device control register as per documentation.
-	u32 ctrl = readl(i82540EM_dev->regs + i82540EM_CTRL);
-	ctrl |= (i82540EM_CTRL_BITMASK_ASDE & i82540EM_CTRL_BITMASK_SLU);
-	ctrl &= ~(i82540EM_CTRL_BITMASK_PHY_RST | i82540EM_CTRL_BITMASK_ILOS | i82540EM_CTRL_BITMASK_VME);
-	writel(ctrl, i82540EM_dev->regs + i82540EM_CTRL);
+	// Program device control registers.
+	// We want:
+	// ASDE
+	// SLU
+	// ~PHY_RST
+	// ~ILOS
+	// ~VME
+	writel((i82540EM_CTRL_BITMASK_ASDE 	|
+		i82540EM_CTRL_BITMASK_SLU)
+		       	&
+	      ~(i82540EM_CTRL_BITMASK_PHY_RST 	|
+		i82540EM_CTRL_BITMASK_ILOS 	|
+		i82540EM_CTRL_BITMASK_VME)	,
+		i82540EM_dev->regs + i82540EM_CTRL);
 
 	// Initialize flow control registers to zero as per documentation.
 	writel(0, i82540EM_dev->regs + i82540EM_FCAL);
@@ -242,79 +265,113 @@ static int i82540EM_probe(struct pci_dev *pci_dev, const struct pci_device_id *e
 	writel(0, i82540EM_dev->regs + i82540EM_FCTTV);
 
 	// Program Ethernet Address.
-	writel(0xCCDDEEFF, i82540EM_dev->regs + i82540EM_RAL);
-	writel(0xAABB,     i82540EM_dev->regs + i82540EM_RAH);
+	writel(ETHERNET_ADDRESS[0] << 8  | ETHERNET_ADDRESS[1], i82540EM_dev->regs + i82540EM_RAH);
+	writel(ETHERNET_ADDRESS[2] << 24 | ETHERNET_ADDRESS[3] << 16 | ETHERNET_ADDRESS[4] << 8 | ETHERNET_ADDRESS[5], i82540EM_dev->regs + i82540EM_RAL);
+	net_dev->dev_addr[0] = ETHERNET_ADDRESS[0];
+	net_dev->dev_addr[1] = ETHERNET_ADDRESS[1];
+	net_dev->dev_addr[2] = ETHERNET_ADDRESS[2];
+	net_dev->dev_addr[3] = ETHERNET_ADDRESS[3];
+	net_dev->dev_addr[4] = ETHERNET_ADDRESS[4];
+	net_dev->dev_addr[5] = ETHERNET_ADDRESS[5];
 
 	// Initialize the multicast table array.
-	for(i = 0; i < i82540EM_MTA_SIZE; i++){
+	for(i = 0; i < i82540EM_MTA_SIZE; i++)
 		writel(0, i82540EM_dev->regs + i82540EM_MTA + (4 * i));
-	}
 
-	// Clear the interrupt mask.
-	writel(0xFFFFFFFF, i82540EM_dev->regs + i82540EM_IMC);
-
-	// Enable desired interrupts.
-	writel(0xFFFFFFFF, i82540EM_dev->regs + i82540EM_IMS);
-	//writel(i82540EM_INTERRUPT_BITMASK_RXT0, i82540EM_dev->regs + i82540EM_IMS);
-
-	error = request_irq(pci_dev->irq, i82540EM_isr, IRQF_SHARED, "i82540EM", i82540EM_dev);
+	// Request the DMA mappings for the RX/TX descriptors and buffers.
+	error = i82540EM_init_dma_mappings(i82540EM_dev);
 	if(error){
-		dev_err(&pci_dev->dev, "Failed requesting IRQ, exiting.\n");
-		goto err_request_irq;
+		dev_err(&pci_dev->dev, "Error requesting DMA mappings, exiting.\n");
+		goto err_init_dma_mappings;
 	}
 
-	// So we know to release the IRQ later.
-	i82540EM_dev->irq_accquired = 1;
-
-	// Initialize the rx descriptors.
+	// Initialize the RX/TX descriptors.
 	// Set status to zero, and provide the buffer address in a platform-independant way.
 	for (i = 0; i < i82540EM_SETTING_RX_BUFFER_COUNT; i++){
 		*(void**)(i82540EM_dev->rx_descriptors + i) = (void*)(i82540EM_dev->rx_buffers_dma_handle + i * i82540EM_SETTING_RX_BUFFER_SIZE);
 		i82540EM_dev->rx_descriptors[i].status = 0;
 	}
+	for (i = 0; i < i82540EM_SETTING_TX_BUFFER_COUNT; i++){
+		*(void**)(i82540EM_dev->tx_descriptors + i) = (void*)(i82540EM_dev->tx_buffers_dma_handle + i * i82540EM_SETTING_TX_BUFFER_SIZE);
+		i82540EM_dev->tx_descriptors[i].status = 0;
+	}
 
-	// Supply the address of the rx descriptor ring.
-	writel(i82540EM_dev->rx_descriptors_dma_handle & 0xFFFFFFFF, i82540EM_dev->regs + i82540EM_RDBAL);
+	// Write addresses of RX/TX descriptor rings.
 	writel(i82540EM_dev->rx_descriptors_dma_handle >> 32, 	     i82540EM_dev->regs + i82540EM_RDBAH);
+	writel(i82540EM_dev->rx_descriptors_dma_handle & 0xFFFFFFFF, i82540EM_dev->regs + i82540EM_RDBAL);
+	writel(i82540EM_dev->tx_descriptors_dma_handle >> 32, 	     i82540EM_dev->regs + i82540EM_TDBAH);
+	writel(i82540EM_dev->tx_descriptors_dma_handle & 0xFFFFFFFF, i82540EM_dev->regs + i82540EM_TDBAL);
 
-	// Supply the length of the rx descriptor ring. Must be a multiple of 128.
+	// Write length of RX/TX descriptor rings.
 	writel(i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE, i82540EM_dev->regs + i82540EM_RDLEN);
+	writel(i82540EM_SETTING_TX_BUFFER_COUNT * i82540EM_TX_DESCRIPTOR_SIZE, i82540EM_dev->regs + i82540EM_TDLEN);
 
-	// Initialize the head and tail pointers, which are both zero on reset.
-	// RDH == RDT indicates empty ring, hw halts until new descriptors are added.
-	// RDT == RDH - 1 indicates a full ring, hardware can write to descriptors.
-	writel(0, i82540EM_dev->regs + i82540EM_RDH);
+	// Initialize head and tail offsets for RX/TX descriptor rings.
+	// tail == head     => All descriptors belong to SW.
+	// tail == head - 1 => All descriptors belong to HW.
+	// On reset, Tail and Head are both zero.
+	// So we only need to set one value, tail of rx ring.
 	writel(i82540EM_SETTING_RX_BUFFER_COUNT - 1, i82540EM_dev->regs + i82540EM_RDT);
 
-	// Final step to receive packets, configure and enable the receiver.
-	u32 rctl = readl(i82540EM_dev->regs + i82540EM_RCTL);
-	rctl |= (i82540EM_RCTL_BITMASK_EN  | i82540EM_RCTL_BITMASK_BAM |
-		 i82540EM_RCTL_BITMASK_UPE | i82540EM_RCTL_BITMASK_MPE );
-	writel(rctl, i82540EM_dev->regs + i82540EM_RCTL);
+	// Initialize the transmitter.
+	// 0x40 << 12 COLD setting as per doc.
+	writel(i82540EM_TCTL_BITMASK_EN | 0x40 << 12, i82540EM_dev->regs + i82540EM_TCTL);
+
+	// Initialize the receiver.
+	// TODO: Don't accept all packets? Set normal values and test that they work.
+	writel(	i82540EM_RCTL_BITMASK_EN  |
+		i82540EM_RCTL_BITMASK_BAM |
+		i82540EM_RCTL_BITMASK_UPE |
+		i82540EM_RCTL_BITMASK_MPE,
+		i82540EM_dev->regs + i82540EM_RCTL);
+
+	// Initialize the RX Tasklet. Must be done before interrupts are enabled.
+	tasklet_init(&i82540EM_dev->rx_tasklet, rx_data, (unsigned long int)i82540EM_dev);
+
+	// Set the desired interrupts.
+	// We want RXTO, RXO, and RXDMT0.
+	writel(i82540EM_INTERRUPT_BITMASK_RXT0 	 |
+	       i82540EM_INTERRUPT_BITMASK_RXO 	 |
+               i82540EM_INTERRUPT_BITMASK_RXDMT0,
+	       i82540EM_dev->regs + i82540EM_IMS);
+
+	// Clear pending interrupts.
+	readl(i82540EM_dev->regs + i82540EM_ICR);
+
+	// Request IRQ, and mark as accquired.
+	error = request_irq(pci_dev->irq, i82540EM_isr, IRQF_SHARED, "i82540EM", i82540EM_dev);
+	if(error){
+		dev_err(&pci_dev->dev, "Failed requesting IRQ, exiting.\n");
+		goto err_request_irq;
+	}
+	i82540EM_dev->irq_accquired = 1;
+
+	// REGISTER THE DEVICE.
+	error = register_netdev(net_dev);
+	if(error){
+		dev_err(&pci_dev->dev, "i82540EM: Failed registering net device. Exiting.\n");
+		goto err_netdev_register;
+	}
 
 	// Done!
 	uart_print("i82540EM: Init completed successfully.\n");
 
 	return 0;
 
+err_netdev_register:
+	if(i82540EM_dev->irq_accquired){
+		free_irq(pci_dev->irq, i82540EM_dev);
+		i82540EM_dev->irq_accquired = 0;
+	}
+
 err_request_irq:
-	if(i82540EM_dev->rx_buffers)
-		dma_free_coherent(
-			&i82540EM_dev->pci_dev->dev,
-			i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_SETTING_RX_BUFFER_SIZE,
-			i82540EM_dev->rx_buffers,
-			i82540EM_dev->rx_buffers_dma_handle);
+	i82540EM_unmap_dma_mappings(i82540EM_dev);
 
-err_rx_buffers_dma_alloc_coherent:
-	if(i82540EM_dev->rx_descriptors)
-		dma_free_coherent(
-			&i82540EM_dev->pci_dev->dev,
-			i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE,
-			i82540EM_dev->rx_descriptors,
-			i82540EM_dev->rx_descriptors_dma_handle);
-
-err_rx_descriptor_dma_alloc_coherent:
-	iounmap(i82540EM_dev->regs);
+err_init_dma_mappings:
+	if(i82540EM_dev->regs){
+		iounmap(i82540EM_dev->regs);
+		i82540EM_dev->regs = 0;
+	}
 
 err_pci_ioremap_bar:
 	free_netdev(net_dev);
@@ -332,40 +389,29 @@ err_pci_enable_device:
 
 static void i82540EM_remove(struct pci_dev *pci_dev){
 
-	uart_print("i82540EM: i82540EM_remove(): Removing device.\n");
-
-	// Get the net_device assigned to this pci_dev device.
 	struct net_device *net_dev = pci_get_drvdata(pci_dev);
+
+	uart_print("i82540EM: i82540EM_remove(): Removing device.\n");
 
 	// If the pci device has an associated net device object, remove it.
 	if (net_dev){
 
-		// Unregister first to stop all activity.
-		//unregister_netdev(net_dev);
-
 		struct i82540EM *i82540EM_dev = netdev_priv(net_dev);
+
+		// Unregister first to stop all activity.
+		unregister_netdev(net_dev);
 
 		if(i82540EM_dev->irq_accquired)
 			free_irq(pci_dev->irq, i82540EM_dev);
 
-		if(i82540EM_dev->rx_descriptors)
-			dma_free_coherent(
-				&i82540EM_dev->pci_dev->dev,
-				i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_RX_DESCRIPTOR_SIZE,
-				i82540EM_dev->rx_descriptors,
-				i82540EM_dev->rx_descriptors_dma_handle);
-
-		if(i82540EM_dev->rx_buffers)
-			dma_free_coherent(
-				&i82540EM_dev->pci_dev->dev,
-				i82540EM_SETTING_RX_BUFFER_COUNT * i82540EM_SETTING_RX_BUFFER_SIZE,
-				i82540EM_dev->rx_buffers,
-				i82540EM_dev->rx_buffers_dma_handle);
-
-		if(i82540EM_dev->regs)
+		if(i82540EM_dev->regs){
 			iounmap(i82540EM_dev->regs);
+			i82540EM_dev->regs = 0;
+		}
 
-		// This erases our driver structure.
+		i82540EM_unmap_dma_mappings(i82540EM_dev);
+
+		// This erases our i82540EM private driver structure.
 		free_netdev(net_dev);
 
 		pci_release_regions(pci_dev);
@@ -377,6 +423,72 @@ static void i82540EM_remove(struct pci_dev *pci_dev){
 
 
 }
+
+// Transmit here.
+static netdev_tx_t tx_data(struct sk_buff *tx_skb_buffer, struct net_device *dev){
+
+	struct i82540EM *i82540EM_dev = netdev_priv(dev);
+	u32 tail = 0;
+
+	uart_print("tx_data(): Transmitting...\n");
+
+	// Dump complete packet. Debug.
+	uart_print("tx_data(): Dumping TX data.\n:");
+	uart_print("tx_data(): tx_skb_buffer address: %llx\n", 			i82540EM_dev->tx_skb_buffer);
+	uart_print("tx_data(): tx_skb_buffer->len: %d\n", 			i82540EM_dev->tx_skb_buffer->len);
+	uart_print("tx_data(): tx_skb_buffer->head address: %llx\n", 		i82540EM_dev->tx_skb_buffer->head);
+	uart_print("tx_data(): tx_skb_buffer->head physical address: %llx\n", 	virt_to_phys(i82540EM_dev->tx_skb_buffer->head));
+	uart_print("tx_data(): TX packet bytes:\n");
+	buffer_uart_print(i82540EM_dev->tx_skb_buffer->head, i82540EM_dev->tx_skb_buffer->len, 16);
+	uart_print("\n");
+
+	// Debugging.
+	if(tx_skb_buffer->len > i82540EM_SETTING_ETHERNET_MTU || tx_skb_buffer->len > i82540EM_SETTING_TX_BUFFER_SIZE){
+		uart_print("tx_data(): Oversized packet. Dropping.\n");
+		kfree_skb(tx_skb_buffer); // NOT SURE!
+		return NETDEV_TX_BUSY;
+	}
+
+	//u32 head = readl(i82540EM_dev->regs + i82540EM_TDH);
+	tail = readl(i82540EM_dev->regs + i82540EM_TDT);
+
+	// Check if we have a free descriptor at tail to write to.
+	if(i82540EM_dev->tx_descriptors[tail].status != i82540EM_TX_STATUS_BITMASK_DD){
+		uart_print("tx_data(): No free descriptor. Dropping.\n");
+		kfree_skb(tx_skb_buffer); // NOT SURE!
+		return NETDEV_TX_BUSY;
+	}
+
+	// Otherwise, descriptor is free. Use it.
+
+	// Clear the status bit.
+	i82540EM_dev->tx_descriptors[tail].status  = 0;
+
+	// Set the command bit to report status and end of packet.
+	// We're assuming single-descriptor packets sincke descriptor size > MTU of 1500.
+	i82540EM_dev->tx_descriptors[tail].command = i82540EM_TX_COMMAND_BITMASK_EOP | i82540EM_TX_COMMAND_BITMASK_RS;
+
+	// Copy the skb buffer data.
+	memcpy(i82540EM_dev->tx_buffers + tail * i82540EM_SETTING_TX_BUFFER_SIZE, tx_skb_buffer->data, tx_skb_buffer->len);
+
+	// Increment the tail pointer, this starts the transmission.
+	writel((tail + 1) % i82540EM_SETTING_TX_BUFFER_COUNT, i82540EM_dev->regs + i82540EM_TDT);
+
+	// Free the sk buffer.
+	kfree_skb(tx_skb_buffer); // Probably.
+
+	uart_print("tx_data(): Transmitted packet!\n");
+
+	// Return success.
+	return NETDEV_TX_OK;
+
+}
+
+static const struct net_device_ops i82540EM_net_ops = {
+	//.ndo_open	= i82540EM_open,
+	//.ndo_stop	= i82540EM_close,
+	.ndo_start_xmit	= tx_data
+};
 
 static struct pci_driver i82540EM_pci_driver = {
 	.name 		= DRIVER_NAME,

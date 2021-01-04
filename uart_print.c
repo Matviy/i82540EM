@@ -47,10 +47,19 @@ void uart_print(char* fmt, ...){
 	vsnprintf(str_buf, BUF_SIZE, fmt, args);
 	va_end(args);
 
-	// Print the string.
-	while(*str_buf)
-		_uart_print(*str_buf++);
+	static_print(str_buf);
 
 	kfree(orig_buf);
 
+}
+
+void buffer_uart_print(char* buffer, uint length, uint columns){
+
+	int i;
+	for(i = 1; i < length+1; i++){
+		uart_print("%.2hhx ", buffer[i-1]);
+		if(i % columns == 0)
+			uart_print("\n");
+
+	}
 }
